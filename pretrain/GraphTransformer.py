@@ -11,7 +11,7 @@ import dgl
 from transformers.models.bert.modeling_bert import BertSelfAttention, BertLayer, BertEmbeddings, BertPreTrainedModel
 from transformers import AutoModelForMaskedLM
 
-from utils import roc_auc_score, mrr_score, ndcg_score
+from utils import roc_auc_score, mrr_score, ndcg_score, regularization_loss
 
 
 ############################ Take care that we assume the last one is venue #########################
@@ -72,6 +72,7 @@ class GraphBertEncoder(nn.Module):
         self.layer = nn.ModuleList([BertLayer(config) for _ in range(config.num_hidden_layers)])
 
         self.graph_attention = GraphAggregation(config=config)
+        self.graph_transform = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
 
     def forward(self,
                 hidden_states,
@@ -89,11 +90,12 @@ class GraphBertEncoder(nn.Module):
 
             if i > 0:
                 # prepare for the graph aggregation
-                cls_emb = hidden_states[:, :0].clone()  # B SN D
+                cls_emb = hidden_states[:, :1].clone()  # B SN D
                 cls_emb = torch.cat((cls_emb, feats),dim=1)
                 station_emb_paper = self.graph_attention(hidden_states=cls_emb, attention_mask=None)  # B SN D
                 # update the station in the query/key
-                hidden_states[:, 0] = station_emb_paper[:,0]
+                hidden_states[:, 0] += torch.relu(self.graph_transform(torch.mean(station_emb_paper, 1)))#station_emb_paper[:,0]
+                feats = station_emb_paper[:,1:]
                 hidden_states = hidden_states.view(all_nodes_num, seq_length, emb_dim)
                 layer_outputs = layer_module(hidden_states, attention_mask=attention_mask)
 
@@ -187,13 +189,10 @@ class GraphTransformerForNeighborPredict(BertPreTrainedModel):
         self.mlm_head = AutoModelForMaskedLM.from_config(config).cls
         self.mlm_weight = 1
         self.vocab_size = config.vocab_size
-        self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
-        self.edge_coef = 10
 
 
     def init_mta_embed(self, args, feat_id):
         feats_path = os.path.join(args.data_path, 'feats_'+str(feat_id)+'.npy')
-        print(feat_id)
         self.feats = np.load(feats_path, allow_pickle=True).item()
         self.embeding_node = nn.ParameterDict({})
         for k, v in self.feats.items():
@@ -217,16 +216,6 @@ class GraphTransformerForNeighborPredict(BertPreTrainedModel):
             )
         )
 
-        self.out_projection = nn.Sequential(
-            *([nn.Linear(self.hidden_size * (self.feats_len), self.hidden_size),
-               nn.PReLU(),
-               nn.Dropout(dropout),]
-            + unfold_nested_list([[
-               nn.Linear(self.hidden_size, self.hidden_size),
-               nn.PReLU(),
-               nn.Dropout(dropout),] for _ in range(n_fp_layers - 1)])
-            )
-        )
 
 
         
@@ -243,7 +232,6 @@ class GraphTransformerForNeighborPredict(BertPreTrainedModel):
             batch_feats = [x for k, x in batch_feats.items()]
             batch_feats = torch.stack(batch_feats, dim=1)
 
-        # batch_feats = self.feature_projection(batch_feats)
         batch_feats = self.feature_projection(batch_feats)
 
         hidden_states = self.bert(input_ids_node_batch, attention_mask_node_batch, batch_feats)
@@ -261,16 +249,17 @@ class GraphTransformerForNeighborPredict(BertPreTrainedModel):
         device = input_ids_query_batch.device
         query_node_id = graph_node_id[:,0]
         key_node_id = graph_node_id[:,1]
-
         query_node_id = query_node_id.flatten().tolist()
         query_batch_feats = {k: x[query_node_id].to(device) for k, x in self.feats.items()}
         query_batch_feats = [self.input_drop(x @ self.embeding_node[k]) for k, x in query_batch_feats.items()]
         query_batch_feats = torch.stack(query_batch_feats, dim=1)
+        query_batch_feats = self.feature_projection(query_batch_feats)
 
         key_node_id = key_node_id.flatten().tolist()
         key_batch_feats = {k: x[key_node_id].to(device) for k, x in self.feats.items()}
         key_batch_feats = [self.input_drop(x @ self.embeding_node[k]) for k, x in key_batch_feats.items()]
         key_batch_feats = torch.stack(key_batch_feats, dim=1)
+        key_batch_feats = self.feature_projection(key_batch_feats)
 
         query_embeddings = self.infer(input_ids_query_batch, attention_mask_query_batch, query_batch_feats, mask_predict=True)
         key_embeddings = self.infer(input_ids_key_batch, attention_mask_key_batch, key_batch_feats, mask_predict=True)
@@ -283,11 +272,28 @@ class GraphTransformerForNeighborPredict(BertPreTrainedModel):
         labels = torch.arange(start=0, end=scores.shape[0], dtype=torch.long, device=scores.device)
         tt_loss = F.cross_entropy(scores, labels)
 
+        feat_num = query_batch_feats.shape[1]
+        # Query - Feat
+        query_feat_loss = 0.0
+        for i in range(feat_num):
+            scores = torch.matmul(query_embedding_cls, query_batch_feats[:,i].transpose(0, 1))
+            labels = torch.arange(start=0, end=scores.shape[0], dtype=torch.long, device=scores.device)
+            query_feat_loss += (F.cross_entropy(scores, labels) + F.cross_entropy(scores.T, labels)) / 2
+        query_feat_loss /= feat_num
+
+        # Key - Feat
+        key_feat_loss = 0.0
+        for i in range(feat_num):
+            scores = torch.matmul(key_embeddings_cls, key_batch_feats[:,i].transpose(0, 1))
+            labels = torch.arange(start=0, end=scores.shape[0], dtype=torch.long, device=scores.device)
+            key_feat_loss += (F.cross_entropy(scores, labels) + F.cross_entropy(scores.T, labels)) / 2
+
+        key_feat_loss /= feat_num
 
         # mlm loss
         q_prediction_scores = self.mlm_head(query_embeddings)[:,1:]
         k_prediction_scores = self.mlm_head(key_embeddings)[:,1:]
         q_mlm_loss = F.cross_entropy(q_prediction_scores.contiguous().view(-1, self.vocab_size), query_label_batch.contiguous().view(-1))
         k_mlm_loss = F.cross_entropy(k_prediction_scores.contiguous().view(-1, self.vocab_size), key_label_batch.contiguous().view(-1))
-        loss = self.mlm_weight * (q_mlm_loss + k_mlm_loss) + tt_loss
+        loss = self.mlm_weight * (q_mlm_loss + k_mlm_loss)  + query_feat_loss + key_feat_loss + tt_loss
         return loss

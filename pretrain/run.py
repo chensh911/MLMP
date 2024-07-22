@@ -129,7 +129,7 @@ def train(args):
             else:
                 torch.distributed.barrier()
 
-        ckpt_path = os.path.join(args.model_dir, '{}-{}-{}-{}-{}-{}-best-nograph.pt'.format(args.data_mode, args.pretrain_LM, args.lr, args.heter_embed_size, args.attr_embed_size, args.attr_vec))
+        ckpt_path = os.path.join(args.model_dir, '{}-{}-{}-{}-{}-{}-best-feat{}.pt'.format(args.data_mode, args.pretrain_LM, args.lr, args.heter_embed_size, args.attr_embed_size, args.attr_vec, args.feats))
         torch.save(model.state_dict(), ckpt_path)
         logging.info(f"Model saved to {ckpt_path}")
         ## start validating
@@ -335,7 +335,7 @@ def infer(args):
         center_node_type = 'paper'
     else:
         center_node_type = 'patent'
-    graph.nodes['patent'].data['feat'] = train_embedding.cpu()
+    graph.nodes[center_node_type].data['feat'] = train_embedding.cpu()
     dgl.save_graphs(graph_infer_path, graph, dataset[1])
 
     # np.save(args.data_path + '/train_pp_emb.npy', train_embedding.cpu().numpy())

@@ -10,12 +10,13 @@ from tqdm import tqdm
 import dgl
 
 sys.path.append("..") 
-from model.RGCN import RGCN
+from model.MLP import MLP
 from utils.EarlyStopping import EarlyStopping
 from utils.LinkScorePredictor import LinkScorePredictor
 from utils.utils import set_random_seed, load_dataset, convert_to_gpu, get_optimizer_and_lr_scheduler, \
     get_node_data_loader, get_n_params, load_patent_dataset, evaluate_link_prediction, get_predict_edge_index, \
     get_edge_data_loader
+from utils.metrics import get_metric
 
 """
 in link prediction, the training process takes one positive sample with negative_sample_edge_num samples
@@ -23,13 +24,14 @@ the evaluation process (validation and test) takes in one positive sample with o
 """
 args = {
     'dataset': 'OAG_Venue',
-    'model_name': 'RGCN',
+    'model_name': 'MLP',
     'predict_category': 'paper',
-    'embedding_name': 'bert_THLM',
+    'predict_head': 'author',
+    'embedding_name': 'bert_infer_feats3_nograph',
     'type': 'link_prediction',
     'seed': 1,
-    'cuda': 2,
-    'learning_rate': 0.001,
+    'cuda': 0,
+    'learning_rate': 0.0005,
     'hidden_units': [256, 256],
     'n_layers': 2,
     'dropout': 0.3,
@@ -76,12 +78,17 @@ def evaluate(model: nn.Module, loader: dgl.dataloading.DistNodeDataLoader, loss_
             blocks = [convert_to_gpu(b, device=device) for b in blocks]
             positive_graph, negative_graph = convert_to_gpu(positive_graph, negative_graph, device=device)
             # target node relation representation in the heterogeneous graph
-            input_features = {ntype: blocks[0].srcnodes[ntype].data['feat'] for ntype in input_nodes.keys()}
+            # input_features = {ntype: blocks[0].srcnodes[ntype].data['feat'] for ntype in input_nodes.keys()}
 
-            nodes_representation = model[0](blocks, copy.deepcopy(input_features))
-
-            positive_score = model[1](positive_graph, nodes_representation, sampled_edge_type).squeeze(dim=-1)
-            negative_score = model[1](negative_graph, nodes_representation, sampled_edge_type).squeeze(dim=-1)
+            # nodes_representation = model[0](blocks, copy.deepcopy(input_features))
+            # input_features = {ntype: blocks[0].srcnodes[ntype].data['feat'] for ntype in input_nodes.keys()}
+            
+            nodes_representation = {}
+            
+            nodes_representation[args['predict_category']] = model[0](input_features[args['predict_category']])
+            nodes_representation[args['predict_head']] = model[1](input_features[args['predict_head']])
+            positive_score = model[2](positive_graph, nodes_representation, sampled_edge_type).squeeze(dim=-1)
+            negative_score = model[2](negative_graph, nodes_representation, sampled_edge_type).squeeze(dim=-1)
 
             y_predict = torch.cat([positive_score, negative_score], dim=0)
             y_true = torch.cat([torch.ones_like(positive_score), torch.zeros_like(negative_score)], dim=0)
@@ -112,13 +119,13 @@ if __name__ == '__main__':
     graph, _, _, _, _, _ = load_dataset(data_path=args['data_path'],
                                         predict_category=args['predict_category'],
                                         data_split_idx_path=args['data_split_idx_path'])
-
     reverse_etypes = dict()
     for stype, etype, dtype in graph.canonical_etypes:
         for srctype, reltype, dsttype in graph.canonical_etypes:
             if srctype == dtype and dsttype == stype and reltype != etype:
                 reverse_etypes[etype] = reltype
                 break
+    
 
     print(f'generating edge idx...')
     train_edge_idx, valid_edge_idx, test_edge_idx = get_predict_edge_index(predict_category=args['predict_category'],
@@ -141,13 +148,18 @@ if __name__ == '__main__':
                                                                  test_edge_idx=test_edge_idx,
                                                                  reverse_etypes=reverse_etypes)
 
-    rgcn = RGCN(graph=graph, input_dim_dict={ntype: graph.nodes[ntype].data['feat'].shape[1] for ntype in graph.ntypes},
-                hidden_sizes=args['hidden_units'], num_bases=args['n_bases'], dropout=args['dropout'],
-                use_self_loop=args['use_self_loop'])
+    # rgcn = RGCN(graph=graph, input_dim_dict={ntype: graph.nodes[ntype].data['feat'].shape[1] for ntype in graph.ntypes},
+    #             hidden_sizes=args['hidden_units'], num_bases=args['n_bases'], dropout=args['dropout'],
+    #             use_self_loop=args['use_self_loop'])
+    input_features_shape = graph.nodes[args['predict_category']].data['feat'][..., -768:].shape
+    mlp_head = MLP(input_features_shape[-1], args['hidden_units'], dropout=args['dropout'])
+    mlp_tail = MLP(input_features_shape[-1], args['hidden_units'], dropout=args['dropout'])
 
-    link_score_predictor = LinkScorePredictor(hid_dim=args['hidden_units'][-1])
+    input_features = {dtype: graph.srcnodes[dtype].data['feat'].to(args['device']) for stype, etype, dtype in graph.canonical_etypes}
 
-    model = nn.Sequential(rgcn, link_score_predictor)
+    link_score_predictor = LinkScorePredictor(args['hidden_units'][0])
+
+    model = nn.Sequential(mlp_head, mlp_tail, link_score_predictor)
 
     model = convert_to_gpu(model, device=args['device'])
     print(model)
@@ -185,12 +197,14 @@ if __name__ == '__main__':
             blocks = [convert_to_gpu(b, device=args['device']) for b in blocks]
             positive_graph, negative_graph = convert_to_gpu(positive_graph, negative_graph, device=args['device'])
             # target node relation representation in the heterogeneous graph
-            input_features = {ntype: blocks[0].srcnodes[ntype].data['feat'] for ntype in input_nodes.keys()}
-
-            nodes_representation = model[0](blocks, copy.deepcopy(input_features))
-
-            positive_score = model[1](positive_graph, nodes_representation, args['sampled_edge_type']).squeeze(dim=-1)
-            negative_score = model[1](negative_graph, nodes_representation, args['sampled_edge_type']).squeeze(dim=-1)
+ 
+            # input_features = {ntype: blocks[0].srcnodes[ntype].data['feat'] for ntype in input_nodes.keys()}
+            nodes_representation = {}
+            
+            nodes_representation[args['predict_category']] = model[0](input_features[args['predict_category']])
+            nodes_representation[args['predict_head']] = model[1](input_features[args['predict_head']])
+            positive_score = model[2](positive_graph, nodes_representation, args['sampled_edge_type']).squeeze(dim=-1)
+            negative_score = model[2](negative_graph, nodes_representation, args['sampled_edge_type']).squeeze(dim=-1)
 
             train_y_predict = torch.cat([positive_score, negative_score], dim=0)
             train_y_true = torch.cat([torch.ones_like(positive_score), torch.zeros_like(negative_score)], dim=0)
@@ -214,7 +228,7 @@ if __name__ == '__main__':
         train_y_trues = torch.cat(train_y_trues, dim=0)
         train_y_predicts = torch.cat(train_y_predicts, dim=0)
 
-        train_RMSE, train_MAE = evaluate_link_prediction(predict_scores=train_y_predicts, true_scores=train_y_trues)
+        train_metrics = evaluate_link_prediction(predict_scores=train_y_predicts, true_scores=train_y_trues)
 
         model.eval()
 
@@ -222,26 +236,31 @@ if __name__ == '__main__':
                                                                sampled_edge_type=args['sampled_edge_type'],
                                                                device=args['device'], mode='validate')
 
-        val_RMSE, val_MAE = evaluate_link_prediction(predict_scores=val_y_predicts,
+        val_metrics = evaluate_link_prediction(predict_scores=val_y_predicts,
                                                      true_scores=val_y_trues)
 
         test_total_loss, test_y_trues, test_y_predicts = evaluate(model, loader=test_loader, loss_func=loss_func,
                                                                   sampled_edge_type=args['sampled_edge_type'],
                                                                   device=args['device'], mode='test')
 
-        test_RMSE, test_MAE = evaluate_link_prediction(predict_scores=test_y_predicts,
+        test_metrics = evaluate_link_prediction(predict_scores=test_y_predicts,
                                                        true_scores=test_y_trues)
-        if best_validate_RMSE is None or val_RMSE < best_validate_RMSE:
-            best_validate_RMSE = val_RMSE
-            scores = {"final_RMSE": float(f"{test_RMSE:.4f}"), "final_MAE": float(f"{test_MAE:.4f}")}
+        if best_validate_RMSE is None or val_metrics['rmse'] < best_validate_RMSE:
+            best_validate_RMSE = val_metrics['rmse']
+            test_y_true = torch.tensor(test_y_trues.detach().cpu(), dtype=torch.int64)
+            test_y_pred = test_y_predicts.unsqueeze(1)
+            test_y_pred = torch.cat((test_y_pred, 1.0-test_y_pred), -1).detach().cpu()
+            more_scores = get_metric(y_true=torch.nn.functional.one_hot(test_y_true, num_classes=2), y_pred=test_y_pred,
+                                idx=0, method='micro', stage='valid')
+            scores = str(test_metrics) + '\n' + str(more_scores)
             final_result = json.dumps(scores, indent=4)
 
         print(
-            f'Epoch: {epoch}, learning rate: {optimizer.param_groups[0]["lr"]}, train loss: {train_total_loss:.4f}, RMSE {train_RMSE:.4f}, MAE {train_MAE:.4f}, \n'
-            f'validate loss: {val_total_loss:.4f}, RMSE {val_RMSE:.4f}, MAE {val_MAE:.4f}, \n'
-            f'test loss: {test_total_loss:.4f}, RMSE {test_RMSE:.4f}, MAE {test_MAE:.4f}')
+            f'Epoch: {epoch}, learning rate: {optimizer.param_groups[0]["lr"]}, train loss: {train_total_loss:.4f}, RMSE {train_metrics["rmse"]:.4f}, MAE {train_metrics["mae"]:.4f}, \n'
+            f'validate loss: {val_total_loss:.4f}, RMSE {val_metrics["rmse"]:.4f}, MAE {val_metrics["mae"]:.4f}, \n'
+            f'test loss: {test_total_loss:.4f}, acc {test_metrics["acc"]:.4f} RMSE {test_metrics["rmse"]:.4f}, MAE {test_metrics["mae"]:.4f}')
 
-        early_stop = early_stopping.step([('RMSE', val_RMSE, False), ('MAE', val_MAE, False)], model)
+        early_stop = early_stopping.step([('RMSE', val_metrics['rmse'], False), ('MAE', val_metrics['mae'], False)], model)
 
         if early_stop:
             break

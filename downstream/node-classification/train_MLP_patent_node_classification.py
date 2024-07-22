@@ -24,11 +24,11 @@ from utils.utils import set_random_seed, load_dataset, convert_to_gpu, get_optim
 args = {
     'dataset': 'GoodReads',
     'model_name': 'MLP',
-    'embedding_name': 'bert_THLM',
+    'embedding_name': 'bert_infer_feats3_nograph',
     'predict_category': 'patent',
     'seed': 0,
     'mode': 'train',
-    'cuda': 1,
+    'cuda': 0,
     'learning_rate': 0.001,
     'hidden_units': [256, 256],
     'dropout': 0.0,
@@ -229,7 +229,7 @@ if __name__ == '__main__':
         # train_y_trues = convert_to_gpu(labels[train_idx], device=args['device'])
         train_y_trues = labels[train_idx]
         train_scores = get_metric(y_true=train_y_trues.cpu(), y_pred=train_y_predicts.detach().cpu(),
-                                   idx=0, method='micro', stage='valid')
+                                   idx=-1, method='micro', stage='valid')
         logger.info(f'final train metric: {train_scores}')
 
         val_y_predicts = model[1](nodes_representation[valid_idx])

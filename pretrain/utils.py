@@ -4,6 +4,7 @@ import random
 import torch
 import numpy as np
 import argparse
+import torch.nn.functional as F
 from sklearn.metrics import roc_auc_score
 
 def str2bool(v):
@@ -55,3 +56,17 @@ def mrr_score(y_true, y_score):
     y_true = np.take(y_true, order)
     rr_score = y_true / (np.arange(len(y_true)) + 1)
     return np.sum(rr_score) / np.sum(y_true)
+
+def regularization_loss(bases):
+    B, k, D = bases.size()
+    loss_all = 0
+    num = 0
+    for i in range(k - 1):
+        for j in range(i + 1, k):
+            num += 1
+            simi = F.cosine_similarity(bases[:,i], bases[:,j].detach(), dim=1)
+            simi = F.relu(simi)
+            loss_all += sum(simi ** 2)
+    loss_all = loss_all / num
+
+    return loss_all

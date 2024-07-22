@@ -21,11 +21,11 @@ from utils.utils import set_random_seed, load_dataset, convert_to_gpu, get_optim
 args = {
     'dataset': 'OAG_Venue',  # OGB_MAG, OAG_CS_Field_F1, OAG_CS_Field_F2, OAG_CS_Venue, Amazon
     'model_name': 'MLP',
-    'embedding_name': 'bert_THLM',
+    'embedding_name': 'bert_infer_feats3_nograph',
     'predict_category': 'paper',
     'seed': 0,
     'mode': 'train',
-    'cuda': 1,
+    'cuda': 0,
     'learning_rate': 0.001,
     'hidden_units': [256, 256],
     'dropout': 0.3,

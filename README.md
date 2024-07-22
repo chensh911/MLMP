@@ -1,4 +1,4 @@
-# MLMP: Metapath-enhanced Language Model Pretraining on Text-Attributed Heterogeneous Graphs
+# MLMP: Metapath-Enhanced Language Model Pretraining on Text-Attributed Heterogeneous Graphs
 
 This repository contains the source code and datasets for MLMP: Metapath-enhanced Language Model Pretraining on Text-Attributed Heterogeneous Graphs.
 
